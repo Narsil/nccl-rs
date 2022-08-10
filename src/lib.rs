@@ -9,23 +9,32 @@ mod tests {
     use super::*;
     use std::os::raw::c_void;
 
-    unsafe fn cudacheck(err: cudaError_t) {
-        // let cudaError_t err = cmd;
+    #[derive(Debug)]
+    struct CudaError(String);
+
+    unsafe fn cudacheck(err: cudaError_t) -> Result<(), CudaError> {
         if err != cudaError_cudaSuccess {
-            panic!(
+            Err(CudaError(format!(
                 "Failed: Cuda error '{:?}'\n",
                 std::ffi::CStr::from_ptr(cudaGetErrorString(err))
-            );
+            )))
+        }else{
+            Ok(())
         }
     }
 
-    unsafe fn ncclcheck(err: ncclResult_t) {
+    #[derive(Debug)]
+    struct NcclError(String);
+
+    unsafe fn ncclcheck(err: ncclResult_t)  -> Result<(), NcclError>{
         // let cudaError_t err = cmd;
         if err != ncclResult_t_ncclSuccess {
-            panic!(
+            Err(NcclError(format!(
                 "Failed: NCCL error '{:?}'\n",
                 std::ffi::CStr::from_ptr(ncclGetErrorString(err))
-            );
+            )))
+        }else{
+            Ok(())
         }
     }
 
@@ -45,44 +54,41 @@ mod tests {
 
             // //allocating and initializing device buffers
             // float** sendbuff = (float**)malloc(nDev * sizeof(float*));
-            let sendbuff: *mut *mut f32 =
-                libc::malloc(std::mem::size_of::<*mut f32>() * n_dev) as *mut *mut f32;
+            let mut sendbuff: Vec<*mut f32> = vec![std::ptr::null_mut(); n_dev];
             // float** recvbuff = (float**)malloc(nDev * sizeof(float*));
-            let recvbuff: *mut *mut f32 =
-                libc::malloc(std::mem::size_of::<*mut f32>() * n_dev) as *mut *mut f32;
+            let mut recvbuff: Vec<*mut f32> = vec![std::ptr::null_mut(); n_dev];
             // cudaStream_t* s = (cudaStream_t*)malloc(sizeof(cudaStream_t)*nDev);
-            let s = libc::malloc(std::mem::size_of::<cudaStream_t>() * n_dev) as *mut cudaStream_t;
+            let mut s: Vec<cudaStream_t>= vec![std::ptr::null_mut(); n_dev];
 
             // for (int i = 0; i < nDev; ++i) {
-            for i in 0..n_dev as i32 {
+            for i in 0..n_dev{
                 //   CUDACHECK(cudaSetDevice(i));
-                cudacheck(cudaSetDevice(i));
+                cudacheck(cudaSetDevice(i as i32)).unwrap();
                 //   CUDACHECK(cudaMalloc(sendbuff + i, size * sizeof(float)));
                 cudacheck(cudaMalloc(
-                    sendbuff.offset(i as isize) as *mut *mut c_void,
+                    &mut sendbuff[i] as *mut *mut f32 as *mut *mut c_void,
                     size * std::mem::size_of::<f32>() as u64,
-                ));
+                )).unwrap();
                 // //   CUDACHECK(cudaMalloc(recvbuff + i, size * sizeof(float)));
                 cudacheck(cudaMalloc(
-                    recvbuff.offset(i as isize) as *mut *mut c_void,
+                    &mut recvbuff[i] as *mut *mut f32 as *mut *mut c_void,
                     size * std::mem::size_of::<f32>() as u64,
-                ));
+                )).unwrap();
                 // //   CUDACHECK(cudaMemset(sendbuff[i], 1, size * sizeof(float)));
-                println!("Pointer {:?}", sendbuff.offset(i as isize) as *mut c_void);
                 cudacheck(cudaMemset(
-                    (*sendbuff.offset(i as isize)) as *mut c_void,
-                    1i32,
-                    (size * std::mem::size_of::<f32>() as u64) as crate::size_t,
-                ));
+                    sendbuff[i] as *mut c_void,
+                    1,
+                    (size * std::mem::size_of::<f32>() as u64) as size_t,
+                )).unwrap();
                 // //   CUDACHECK(cudaMemset(recvbuff[i], 0, size * sizeof(float)));
-                // cudacheck(cudaMemset(recvbuff[i], 0, size * sizeof(float)));
+                // cudacheck(cudaMemset(recvbuff[i], 0, size * sizeof(float))).unwrap();
                 cudacheck(cudaMemset(
-                    (*recvbuff.offset(i as isize)) as *mut c_void,
-                    1i32,
-                    (size * std::mem::size_of::<f32>() as u64) as crate::size_t,
-                ));
+                    recvbuff[i] as *mut c_void,
+                    0,
+                    (size * std::mem::size_of::<f32>() as u64) as size_t,
+                )).unwrap();
                 // //   CUDACHECK(cudaStreamCreate(s+i));
-                cudacheck(cudaStreamCreate(s.offset(i as isize)));
+                cudacheck(cudaStreamCreate(&mut s[i])).unwrap();
                 // // }
             }
 
@@ -92,32 +98,50 @@ mod tests {
                 comms.as_mut_ptr(),
                 n_dev as i32,
                 devs.as_ptr(),
-            ));
+            )).unwrap();
 
             //  //calling NCCL communication API. Group API is required when using
             //  //multiple devices per thread
             // NCCLCHECK(ncclGroupStart());
+            ncclcheck(ncclGroupStart()).unwrap();
             // for (int i = 0; i < nDev; ++i)
-            //   NCCLCHECK(ncclAllReduce((const void*)sendbuff[i], (void*)recvbuff[i], size, ncclFloat, ncclSum,
-            //       comms[i], s[i]));
+            for i in 0..n_dev{
+             // ncclcheck(ncclAllReduce((const void*)sendbuff[i], (void*)recvbuff[i], size, ncclFloat, ncclSum,
+             //     comms[i], s[i]));
+             ncclcheck(ncclAllReduce(sendbuff[i] as *const c_void, recvbuff[i] as *mut c_void, size, ncclDataType_t_ncclFloat, ncclRedOp_t_ncclSum,
+                 comms[i], s[i])).unwrap();
+            }
             // NCCLCHECK(ncclGroupEnd());
+            ncclcheck(ncclGroupEnd()).unwrap();
 
             // //synchronizing on CUDA streams to wait for completion of NCCL operation
             // for (int i = 0; i < nDev; ++i) {
+            for i in 0..n_dev{
             //   CUDACHECK(cudaSetDevice(i));
+                   cudacheck(cudaSetDevice(i as i32)).unwrap();
             //   CUDACHECK(cudaStreamSynchronize(s[i]));
+                 cudacheck(cudaStreamSynchronize(s[i])).unwrap();
             // }
+            }
 
-            // //free device buffers
+            //free device buffers
             // for (int i = 0; i < nDev; ++i) {
+             for i in 0..n_dev{
             //   CUDACHECK(cudaSetDevice(i));
+                 cudacheck(cudaSetDevice(i as i32)).unwrap();
             //   CUDACHECK(cudaFree(sendbuff[i]));
+                 cudacheck(cudaFree(sendbuff[i] as *mut c_void)).unwrap();
             //   CUDACHECK(cudaFree(recvbuff[i]));
+                 cudacheck(cudaFree(recvbuff[i] as *mut c_void)).unwrap();
             // }
+            }
 
             // //finalizing NCCL
             // for(int i = 0; i < nDev; ++i)
+            for i in 0..n_dev{
             //     ncclCommDestroy(comms[i]);
+                 ncclCommDestroy(comms[i]);
+            }
 
             // printf("Success \n");
             // return 0;
