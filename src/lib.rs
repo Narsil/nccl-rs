@@ -54,7 +54,10 @@ mod tests {
     fn test_nccl_example() {
         unsafe {
             // ncclComm_t comms[4];
-            let n_dev = 16;
+            let mut n_dev = 0i32;
+            cudacheck(cudaGetDeviceCount(&mut n_dev)).unwrap();
+            let n_dev = n_dev as usize;
+            println!("Found {:?} devices", n_dev);
             let mut comms: Vec<ncclComm_t> = vec![std::ptr::null_mut(); n_dev];
 
             // //managing 4 devices
@@ -247,7 +250,9 @@ mod tests {
     #[test]
     fn test_nccl_thread() {
         unsafe {
-            let n_dev = 16;
+            let mut n_dev = 0i32;
+            cudacheck(cudaGetDeviceCount(&mut n_dev)).unwrap();
+            println!("Found {:?} devices", n_dev);
             let (s, r) = std::sync::mpsc::channel();
 
             //initializing NCCL

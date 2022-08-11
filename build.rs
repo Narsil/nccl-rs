@@ -17,8 +17,9 @@ fn main() {
     // println!("cargo:rustc-link-lib=cuda_runtime");
 
     let cuda_home = env_var_rerun("CUDA_HOME").unwrap_or_else(|_| "/usr/local/cuda/".to_string());
+    let nccl_home = env_var_rerun("NCCL_HOME").unwrap_or_else(|_| "/usr/local/nccl/".to_string());
     println!("cargo:rustc-link-search=native={cuda_home}lib64/");
-    println!("cargo:rustc-link-search=native=/usr/local/nccl_2.13.4-1+cuda11.7_x86_64/lib");
+    println!("cargo:rustc-link-search=native={nccl_home}lib");
     println!("cargo:rustc-link-lib=cudart");
     println!("cargo:rustc-link-lib=nccl");
 
@@ -33,9 +34,7 @@ fn main() {
         // bindings for.
         .header("wrapper.h")
         .clang_arg(&format!("-I{cuda_home}include"))
-        .clang_arg(&format!(
-            "-I/usr/local/nccl_2.13.4-1+cuda11.7_x86_64/include"
-        ))
+        .clang_arg(&format!("-I{nccl_home}include"))
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks))
