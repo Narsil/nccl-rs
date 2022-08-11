@@ -11,4 +11,4 @@ edition = "2021"
 bindgen = "0.60.1"
 
 [dev-dependencies]
-libc = "0.2"
+thiserror = "1.0"
