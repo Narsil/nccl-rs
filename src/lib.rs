@@ -13,10 +13,10 @@ mod tests {
     #[derive(Error, Debug)]
     struct CudaError(String);
     impl std::fmt::Display for CudaError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
     }
-}
 
     unsafe fn cudacheck(err: cudaError_t) -> Result<(), CudaError> {
         if err != cudaError_cudaSuccess {
@@ -33,10 +33,10 @@ mod tests {
     struct NcclError(String);
 
     impl std::fmt::Display for NcclError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
     }
-}
 
     unsafe fn ncclcheck(err: ncclResult_t) -> Result<(), NcclError> {
         // let cudaError_t err = cmd;
@@ -179,69 +179,69 @@ mod tests {
     }
 
     #[derive(Debug, Error)]
-    enum ThreadError{
+    enum ThreadError {
         #[error("Cuda error")]
         CudaError(#[from] CudaError),
         #[error("Nccl error")]
         NcclError(#[from] NcclError),
     }
 
-    unsafe fn thread_inner(ranks: i32, rank: i32, unique_id: ncclUniqueId) -> Result<Vec<std::time::Duration>, ThreadError>{
-            let size = 32 * 1024 * 1024;
-                    let mut comm: ncclComm_t = std::ptr::null_mut();
-                    let mut sendbuff = std::ptr::null_mut();
-                    let mut recvbuff = std::ptr::null_mut();
+    unsafe fn thread_inner(
+        ranks: i32,
+        rank: i32,
+        unique_id: ncclUniqueId,
+    ) -> Result<Vec<std::time::Duration>, ThreadError> {
+        let size = 32 * 1024 * 1024;
+        let mut comm: ncclComm_t = std::ptr::null_mut();
+        let mut sendbuff = std::ptr::null_mut();
+        let mut recvbuff = std::ptr::null_mut();
 
-                    cudacheck(cudaSetDevice(rank))?;
-                    ncclcheck(ncclCommInitRank(&mut comm, ranks, unique_id, rank))?;
-                    cudacheck(cudaMalloc(
-                        &mut sendbuff as *mut *mut f32 as *mut *mut c_void,
-                        size * std::mem::size_of::<f32>() as u64,
-                    ))
-                    ?;
-                    cudacheck(cudaMalloc(
-                        &mut recvbuff as *mut *mut f32 as *mut *mut c_void,
-                        size * std::mem::size_of::<f32>() as u64,
-                    ))
-                    ?;
-                    cudacheck(cudaMemset(
-                        sendbuff as *mut c_void,
-                        1,
-                        (size * std::mem::size_of::<f32>() as u64) as size_t,
-                    ))
-                    ?;
-                    cudacheck(cudaMemset(
-                        recvbuff as *mut c_void,
-                        0,
-                        (size * std::mem::size_of::<f32>() as u64) as size_t,
-                    ))
-                    ?;
+        cudacheck(cudaSetDevice(rank))?;
+        ncclcheck(ncclCommInitRank(&mut comm, ranks, unique_id, rank))?;
+        cudacheck(cudaMalloc(
+            &mut sendbuff as *mut *mut f32 as *mut *mut c_void,
+            size * std::mem::size_of::<f32>() as u64,
+        ))?;
+        cudacheck(cudaMalloc(
+            &mut recvbuff as *mut *mut f32 as *mut *mut c_void,
+            size * std::mem::size_of::<f32>() as u64,
+        ))?;
+        cudacheck(cudaMemset(
+            sendbuff as *mut c_void,
+            1,
+            (size * std::mem::size_of::<f32>() as u64) as size_t,
+        ))?;
+        cudacheck(cudaMemset(
+            recvbuff as *mut c_void,
+            0,
+            (size * std::mem::size_of::<f32>() as u64) as size_t,
+        ))?;
 
-                    let mut stream = std::ptr::null_mut();
-                    cudacheck(cudaStreamCreate(&mut stream))?;
-                    
-                    let mut timings = vec![];
-                    for _ in 0..10{
-                    let start = std::time::Instant::now();
-                    ncclcheck(ncclAllReduce(
-                        sendbuff as *const c_void,
-                        recvbuff as *mut c_void,
-                        size,
-                        ncclDataType_t_ncclFloat,
-                        ncclRedOp_t_ncclSum,
-                        comm,
-                        stream,
-                    ))
-                    ?;
-                    cudacheck(cudaStreamSynchronize(stream))?;
-                    let elapsed = start.elapsed();
-                    timings.push(elapsed);
-                    }
+        let mut stream = std::ptr::null_mut();
+        cudacheck(cudaStreamCreate(&mut stream))?;
+        cudacheck(cudaStreamSynchronize(stream))?;
 
-                    cudacheck(cudaFree(sendbuff as *mut c_void))?;
-                    cudacheck(cudaFree(recvbuff as *mut c_void))?;
-                    ncclCommDestroy(comm);
-                    Ok( timings)
+        let mut timings = vec![];
+        for _ in 0..10 {
+            let start = std::time::Instant::now();
+            ncclcheck(ncclAllReduce(
+                sendbuff as *const c_void,
+                recvbuff as *mut c_void,
+                size,
+                ncclDataType_t_ncclFloat,
+                ncclRedOp_t_ncclSum,
+                comm,
+                stream,
+            ))?;
+            let elapsed = start.elapsed();
+            timings.push(elapsed);
+            cudacheck(cudaStreamSynchronize(stream))?;
+        }
+
+        cudacheck(cudaFree(sendbuff as *mut c_void))?;
+        cudacheck(cudaFree(recvbuff as *mut c_void))?;
+        ncclCommDestroy(comm);
+        Ok(timings)
     }
 
     #[test]
@@ -262,8 +262,6 @@ mod tests {
                 std::thread::spawn(move || {
                     let out = thread_inner(n_dev as i32, i as i32, unique_id);
                     s.send((out, i)).unwrap();
-
-
                 });
             }
 
