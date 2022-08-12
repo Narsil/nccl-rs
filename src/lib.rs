@@ -1,280 +1,168 @@
-#![allow(non_upper_case_globals)]
-#![allow(non_camel_case_types)]
-#![allow(non_snake_case)]
+use nccl_sys::*;
+use tch::{kind::Kind, Tensor};
+use thiserror::Error;
 
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+#[derive(Error, Debug)]
+pub struct CudaError(String);
+impl std::fmt::Display for CudaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+unsafe fn cudacheck(err: cudaError_t) -> Result<(), CudaError> {
+    if err != cudaError_cudaSuccess {
+        Err(CudaError(format!(
+            "{:?}",
+            std::ffi::CStr::from_ptr(cudaGetErrorString(err))
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Error, Debug)]
+pub struct NcclError(String);
+
+impl std::fmt::Display for NcclError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+unsafe fn ncclcheck(err: ncclResult_t) -> Result<(), NcclError> {
+    // let cudaError_t err = cmd;
+    if err != ncclResult_t_ncclSuccess {
+        Err(NcclError(format!(
+            "{:?}",
+            std::ffi::CStr::from_ptr(ncclGetErrorString(err))
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ThreadGroupError {
+    #[error("Cuda error {0}")]
+    CudaError(#[from] CudaError),
+    #[error("Nccl error {0}, use NCCL_DEBUG=INFO to get more information")]
+    NcclError(#[from] NcclError),
+}
+
+pub struct ThreadGroup {
+    // ranks: i32,
+    // rank: i32,
+    comm: ncclComm_t,
+    stream: *mut CUstream_st,
+}
+
+fn kind_to_nccl(kind: Kind) -> ncclDataType_t {
+    match kind {
+        Kind::Half => ncclDataType_t_ncclFloat16,
+        Kind::Float => ncclDataType_t_ncclFloat,
+        Kind::Double => ncclDataType_t_ncclFloat64,
+        Kind::Int8 => ncclDataType_t_ncclInt8,
+        // Kind::Int16 => ncclDataType_t_ncclInt16,
+        Kind::Int => ncclDataType_t_ncclInt32,
+        Kind::Uint8 => ncclDataType_t_ncclChar,
+        // Kind::Uint16 => ncclDataType_t_ncclUint16,
+        // Kind::Uint32 => ncclDataType_t_ncclUint32,
+        // Kind::Uint64 => ncclDataType_t_ncclUint64,
+        _ => todo!(),
+    }
+}
+
+impl ThreadGroup {
+    pub fn new(ranks: i32, rank: i32, unique_id: ncclUniqueId) -> Result<Self, ThreadGroupError> {
+        let mut comm: ncclComm_t = std::ptr::null_mut();
+        let mut stream = std::ptr::null_mut();
+        unsafe {
+            cudacheck(cudaSetDevice(rank))?;
+            ncclcheck(ncclCommInitRank(&mut comm, ranks, unique_id, rank))?;
+            cudacheck(cudaStreamCreate(&mut stream))?;
+            cudacheck(cudaStreamSynchronize(stream))?;
+        }
+        Ok(Self {
+            // ranks,
+            // rank,
+            comm,
+            stream,
+        })
+    }
+
+    pub fn new_id() -> Result<ncclUniqueId, ThreadGroupError> {
+        let internal: [i8; 128] = [0; 128];
+        let mut unique_id = ncclUniqueId { internal };
+        unsafe {
+            ncclcheck(ncclGetUniqueId(&mut unique_id))?;
+        }
+        Ok(unique_id)
+    }
+
+    pub fn all_reduce(&self, x: Tensor) -> Result<Tensor, ThreadGroupError> {
+        let size: i64 = x.size().into_iter().product();
+        let nccl_type = kind_to_nccl(x.kind());
+        unsafe {
+            ncclcheck(ncclAllReduce(
+                x.data_ptr(),
+                x.data_ptr(),
+                size as u64,
+                nccl_type,
+                ncclRedOp_t_ncclSum,
+                self.comm,
+                self.stream,
+            ))?;
+        }
+        Ok(x)
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::raw::c_void;
-    use thiserror::Error;
+    use tch::{kind::Kind, Cuda, Device};
 
-    #[derive(Error, Debug)]
-    struct CudaError(String);
-    impl std::fmt::Display for CudaError {
-        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            write!(f, "{}", self.0)
-        }
-    }
+    #[test]
+    fn simple_test() {
+        let world_size = Cuda::device_count() as i32;
+        let id = ThreadGroup::new_id().unwrap();
+        for rank in 0..world_size {
+            std::thread::spawn(move || {
+                let out = Tensor::ones(
+                    &[32, 1024, 1024],
+                    (Kind::Float, Device::Cuda(rank as usize)),
+                );
+                let group = ThreadGroup::new(world_size, rank, id).unwrap();
+                let out = group.all_reduce(out).unwrap();
+                let values: Vec<_> = Vec::<f64>::from(out).into_iter().take(5).collect();
 
-    unsafe fn cudacheck(err: cudaError_t) -> Result<(), CudaError> {
-        if err != cudaError_cudaSuccess {
-            Err(CudaError(format!(
-                "Failed: Cuda error '{:?}'\n",
-                std::ffi::CStr::from_ptr(cudaGetErrorString(err))
-            )))
-        } else {
-            Ok(())
-        }
-    }
-
-    #[derive(Error, Debug)]
-    struct NcclError(String);
-
-    impl std::fmt::Display for NcclError {
-        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            write!(f, "{}", self.0)
-        }
-    }
-
-    unsafe fn ncclcheck(err: ncclResult_t) -> Result<(), NcclError> {
-        // let cudaError_t err = cmd;
-        if err != ncclResult_t_ncclSuccess {
-            Err(NcclError(format!(
-                "Failed: NCCL error '{:?}'\n",
-                std::ffi::CStr::from_ptr(ncclGetErrorString(err))
-            )))
-        } else {
-            Ok(())
+                assert_eq!(values, vec![world_size as f64; 5]);
+            });
         }
     }
 
     #[test]
-    fn test_nccl_example() {
-        unsafe {
-            // ncclComm_t comms[4];
-            let mut n_dev = 0i32;
-            cudacheck(cudaGetDeviceCount(&mut n_dev)).unwrap();
-            let n_dev = n_dev as usize;
-            println!("Found {:?} devices", n_dev);
-            let mut comms: Vec<ncclComm_t> = vec![std::ptr::null_mut(); n_dev];
-
-            // //managing 4 devices
-            // int nDev = 4;
-            // int size = 32*1024*1024;
-            let size = 32 * 1024 * 1024;
-            // int devs[4] = { 0, 1, 2, 3 };
-            let devs: Vec<_> = (0..n_dev as i32).collect();
-
-            // //allocating and initializing device buffers
-            // float** sendbuff = (float**)malloc(nDev * sizeof(float*));
-            let mut sendbuff: Vec<*mut f32> = vec![std::ptr::null_mut(); n_dev];
-            // float** recvbuff = (float**)malloc(nDev * sizeof(float*));
-            let mut recvbuff: Vec<*mut f32> = vec![std::ptr::null_mut(); n_dev];
-            // cudaStream_t* s = (cudaStream_t*)malloc(sizeof(cudaStream_t)*nDev);
-            let mut s: Vec<cudaStream_t> = vec![std::ptr::null_mut(); n_dev];
-
-            // for (int i = 0; i < nDev; ++i) {
-            for i in 0..n_dev {
-                //   CUDACHECK(cudaSetDevice(i));
-                cudacheck(cudaSetDevice(i as i32)).unwrap();
-                //   CUDACHECK(cudaMalloc(sendbuff + i, size * sizeof(float)));
-                cudacheck(cudaMalloc(
-                    &mut sendbuff[i] as *mut *mut f32 as *mut *mut c_void,
-                    size * std::mem::size_of::<f32>() as u64,
-                ))
-                .unwrap();
-                // //   CUDACHECK(cudaMalloc(recvbuff + i, size * sizeof(float)));
-                cudacheck(cudaMalloc(
-                    &mut recvbuff[i] as *mut *mut f32 as *mut *mut c_void,
-                    size * std::mem::size_of::<f32>() as u64,
-                ))
-                .unwrap();
-                // //   CUDACHECK(cudaMemset(sendbuff[i], 1, size * sizeof(float)));
-                cudacheck(cudaMemset(
-                    sendbuff[i] as *mut c_void,
-                    1,
-                    (size * std::mem::size_of::<f32>() as u64) as size_t,
-                ))
-                .unwrap();
-                // //   CUDACHECK(cudaMemset(recvbuff[i], 0, size * sizeof(float)));
-                // cudacheck(cudaMemset(recvbuff[i], 0, size * sizeof(float))).unwrap();
-                cudacheck(cudaMemset(
-                    recvbuff[i] as *mut c_void,
-                    0,
-                    (size * std::mem::size_of::<f32>() as u64) as size_t,
-                ))
-                .unwrap();
-                // //   CUDACHECK(cudaStreamCreate(s+i));
-                cudacheck(cudaStreamCreate(&mut s[i])).unwrap();
-                // // }
-            }
-
-            // //initializing NCCL
-            // NCCLCHECK(ncclCommInitAll(comms, nDev, devs));
-            ncclcheck(ncclCommInitAll(
-                comms.as_mut_ptr(),
-                n_dev as i32,
-                devs.as_ptr(),
-            ))
-            .unwrap();
-
-            //  //calling NCCL communication API. Group API is required when using
-            //  //multiple devices per thread
-            // NCCLCHECK(ncclGroupStart());
-            for _ in 0..10 {
-                let start = std::time::Instant::now();
-                ncclcheck(ncclGroupStart()).unwrap();
-                // for (int i = 0; i < nDev; ++i)
-                for i in 0..n_dev {
-                    // ncclcheck(ncclAllReduce((const void*)sendbuff[i], (void*)recvbuff[i], size, ncclFloat, ncclSum,
-                    //     comms[i], s[i]));
-                    ncclcheck(ncclAllReduce(
-                        sendbuff[i] as *const c_void,
-                        recvbuff[i] as *mut c_void,
-                        size,
-                        ncclDataType_t_ncclFloat,
-                        ncclRedOp_t_ncclSum,
-                        comms[i],
-                        s[i],
-                    ))
-                    .unwrap();
-                }
-                // NCCLCHECK(ncclGroupEnd());
-                ncclcheck(ncclGroupEnd()).unwrap();
-
-                // //synchronizing on CUDA streams to wait for completion of NCCL operation
-                // for (int i = 0; i < nDev; ++i) {
-                for i in 0..n_dev {
-                    //   CUDACHECK(cudaSetDevice(i));
-                    cudacheck(cudaSetDevice(i as i32)).unwrap();
-                    //   CUDACHECK(cudaStreamSynchronize(s[i]));
-                    cudacheck(cudaStreamSynchronize(s[i])).unwrap();
-                    // }
-                }
-                let elapsed = start.elapsed();
-                println!("Elapsed {:?}", elapsed);
-            }
-
-            //free device buffers
-            // for (int i = 0; i < nDev; ++i) {
-            for i in 0..n_dev {
-                //   CUDACHECK(cudaSetDevice(i));
-                cudacheck(cudaSetDevice(i as i32)).unwrap();
-                //   CUDACHECK(cudaFree(sendbuff[i]));
-                cudacheck(cudaFree(sendbuff[i] as *mut c_void)).unwrap();
-                //   CUDACHECK(cudaFree(recvbuff[i]));
-                cudacheck(cudaFree(recvbuff[i] as *mut c_void)).unwrap();
-                // }
-            }
-
-            // //finalizing NCCL
-            // for(int i = 0; i < nDev; ++i)
-            for i in 0..n_dev {
-                //     ncclCommDestroy(comms[i]);
-                ncclCommDestroy(comms[i]);
-            }
-
-            // printf("Success \n");
-            // return 0;
+    fn simple_test_2_gpus() {
+        let world_size = Cuda::device_count() as i32;
+        if world_size < 2 {
+            return;
         }
-    }
+        // We force the number of the world so we can statically check the result
+        let world_size = 2;
+        let id = ThreadGroup::new_id().unwrap();
+        for rank in 0..world_size {
+            std::thread::spawn(move || {
+                let out = Tensor::ones(
+                    &[32, 1024, 1024],
+                    (Kind::Float, Device::Cuda(rank as usize)),
+                );
+                let group = ThreadGroup::new(world_size, rank, id).unwrap();
+                let out = group.all_reduce(out).unwrap();
+                let values: Vec<_> = Vec::<f64>::from(out).into_iter().take(5).collect();
 
-    #[derive(Debug, Error)]
-    enum ThreadError {
-        #[error("Cuda error")]
-        CudaError(#[from] CudaError),
-        #[error("Nccl error")]
-        NcclError(#[from] NcclError),
-    }
-
-    unsafe fn thread_inner(
-        ranks: i32,
-        rank: i32,
-        unique_id: ncclUniqueId,
-    ) -> Result<Vec<std::time::Duration>, ThreadError> {
-        let size = 32 * 1024 * 1024;
-        let mut comm: ncclComm_t = std::ptr::null_mut();
-        let mut sendbuff = std::ptr::null_mut();
-        let mut recvbuff = std::ptr::null_mut();
-
-        cudacheck(cudaSetDevice(rank))?;
-        ncclcheck(ncclCommInitRank(&mut comm, ranks, unique_id, rank))?;
-        cudacheck(cudaMalloc(
-            &mut sendbuff as *mut *mut f32 as *mut *mut c_void,
-            size * std::mem::size_of::<f32>() as u64,
-        ))?;
-        cudacheck(cudaMalloc(
-            &mut recvbuff as *mut *mut f32 as *mut *mut c_void,
-            size * std::mem::size_of::<f32>() as u64,
-        ))?;
-        cudacheck(cudaMemset(
-            sendbuff as *mut c_void,
-            1,
-            (size * std::mem::size_of::<f32>() as u64) as size_t,
-        ))?;
-        cudacheck(cudaMemset(
-            recvbuff as *mut c_void,
-            0,
-            (size * std::mem::size_of::<f32>() as u64) as size_t,
-        ))?;
-
-        let mut stream = std::ptr::null_mut();
-        cudacheck(cudaStreamCreate(&mut stream))?;
-        cudacheck(cudaStreamSynchronize(stream))?;
-
-        let mut timings = vec![];
-        for _ in 0..10 {
-            let start = std::time::Instant::now();
-            ncclcheck(ncclAllReduce(
-                sendbuff as *const c_void,
-                recvbuff as *mut c_void,
-                size,
-                ncclDataType_t_ncclFloat,
-                ncclRedOp_t_ncclSum,
-                comm,
-                stream,
-            ))?;
-            let elapsed = start.elapsed();
-            timings.push(elapsed);
-            cudacheck(cudaStreamSynchronize(stream))?;
-        }
-
-        cudacheck(cudaFree(sendbuff as *mut c_void))?;
-        cudacheck(cudaFree(recvbuff as *mut c_void))?;
-        ncclCommDestroy(comm);
-        Ok(timings)
-    }
-
-    #[test]
-    fn test_nccl_thread() {
-        unsafe {
-            let mut n_dev = 0i32;
-            cudacheck(cudaGetDeviceCount(&mut n_dev)).unwrap();
-            println!("Found {:?} devices", n_dev);
-            let (s, r) = std::sync::mpsc::channel();
-
-            //initializing NCCL
-            let internal: [i8; 128] = [0; 128];
-            let mut unique_id = ncclUniqueId { internal };
-            ncclcheck(ncclGetUniqueId(&mut unique_id)).unwrap();
-
-            // for (int i = 0; i < nDev; ++i) {
-            for i in 0..n_dev {
-                let s = s.clone();
-                let unique_id = unique_id.clone();
-                std::thread::spawn(move || {
-                    let out = thread_inner(n_dev as i32, i as i32, unique_id);
-                    s.send((out, i)).unwrap();
-                });
-            }
-
-            for _ in 0..n_dev {
-                let (out, rank) = r.recv().unwrap();
-                let out = out.unwrap();
-                println!("Received {:?} {:?}", rank, out);
-            }
+                assert_eq!(values, vec![2.0; 5]);
+            });
         }
     }
 }
