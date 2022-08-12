@@ -128,10 +128,7 @@ mod tests {
         let world_size = Cuda::device_count() as i32;
         let id = ThreadGroup::new_id().unwrap();
         let (s, r) = std::sync::mpsc::channel();
-            let out = Tensor::ones(
-                &[32, 1024, 1024],
-                (Kind::Float, Device::Cuda(0)),
-            );
+        let out = Tensor::ones(&[32, 1024, 1024], (Kind::Float, Device::Cuda(0)));
         for rank in 0..world_size {
             let s = s.clone();
             let out = out.to_device(Device::Cuda(rank as usize));
@@ -143,9 +140,9 @@ mod tests {
                 s.send(values).unwrap();
             });
         }
-        for _ in 0..world_size{
-                let values = r.recv().unwrap();
-                assert_eq!(values, vec![2.0; 5]);
+        for _ in 0..world_size {
+            let values = r.recv().unwrap();
+            assert_eq!(values, vec![world_size as f64; 5]);
         }
     }
 
@@ -158,38 +155,30 @@ mod tests {
         }
         // We force the number of the world so we can statically check the result
         let world_size = 2i32;
-        let n_steps = 10;
         let id = ThreadGroup::new_id().unwrap();
 
         let (s, r) = std::sync::mpsc::channel();
         for rank in 0..world_size {
             let s = s.clone();
-                let mut out = Tensor::ones(
-                    &[32, 1024, 1024],
-                    (Kind::Float, Device::Cuda(rank as usize)),
-                );
+            let mut out = Tensor::ones(
+                &[32, 1024, 1024],
+                (Kind::Float, Device::Cuda(rank as usize)),
+            );
             std::thread::spawn(move || {
                 let group = ThreadGroup::new(world_size, rank, id).unwrap();
 
-                let mut elapsed = std::time::Duration::from_millis(10);
-                for _ in 0..n_steps{
                 let start = std::time::Instant::now();
                 out = group.all_reduce(out).unwrap();
-                elapsed = start.elapsed();
-                out = out + 1;
-                }
+                let elapsed = start.elapsed();
 
                 let values: Vec<_> = Vec::<f64>::from(&out).into_iter().take(5).collect();
                 s.send((values, elapsed)).unwrap();
             });
         }
-        // for step in 0..n_steps{
-        for _ in 0..world_size{
-        let (values, elapsed) = r.recv().unwrap();
-                println!("Elapsed {:?}", elapsed);
-                assert_eq!(values, vec![2.0f64.powf((n_steps) as f64); 5]);
+        for _ in 0..world_size {
+            let (values, elapsed) = r.recv().unwrap();
+            println!("Elapsed {:?}", elapsed);
+            assert_eq!(values, vec![2.0f64; 5]);
         }
-        // }
-
     }
 }
