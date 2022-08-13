@@ -51,8 +51,8 @@ pub enum ThreadGroupError {
 }
 
 pub struct ThreadGroup {
-    // ranks: i32,
-    // rank: i32,
+    ranks: i32,
+    rank: i32,
     comm: ncclComm_t,
     stream: *mut CUstream_st,
 }
@@ -84,11 +84,17 @@ impl ThreadGroup {
             cudacheck(cudaStreamSynchronize(stream))?;
         }
         Ok(Self {
-            // ranks,
-            // rank,
+            ranks,
+            rank,
             comm,
             stream,
         })
+    }
+    pub fn rank(&self) -> i32 {
+        self.rank
+    }
+    pub fn ranks(&self) -> i32 {
+        self.ranks
     }
 
     pub fn new_id() -> Result<ncclUniqueId, ThreadGroupError> {
