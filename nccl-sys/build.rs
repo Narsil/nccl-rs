@@ -35,6 +35,7 @@ fn main() {
         .header("wrapper.h")
         .clang_arg(&format!("-I{cuda_home}include"))
         .clang_arg(&format!("-I{nccl_home}include"))
+        .clang_arg("-D __CUDA_BF16_TYPES_EXIST__")
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks))
