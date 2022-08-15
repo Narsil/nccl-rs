@@ -122,6 +122,40 @@ impl ThreadGroup {
         }
         Ok(x)
     }
+
+    pub fn broadcast(&self, x: Tensor) -> Result<Tensor, ThreadGroupError> {
+        let size: i64 = x.size().into_iter().product();
+        let nccl_type = kind_to_nccl(x.kind());
+        unsafe {
+            ncclcheck(ncclBroadcast(
+                x.data_ptr(),
+                x.data_ptr(),
+                size as u64,
+                nccl_type,
+                self.rank,
+                self.comm,
+                self.stream,
+            ))?;
+        }
+        Ok(x)
+    }
+
+    pub fn broadcast_recv(&self, rank: usize) -> Result<Tensor, ThreadGroupError> {
+        let size: i64 = x.size().into_iter().product();
+        let nccl_type = kind_to_nccl(x.kind());
+        unsafe {
+            ncclcheck(ncclBoradcast(
+                x.data_ptr(),
+                x.data_ptr(),
+                size as u64,
+                nccl_type,
+                rank,
+                self.comm,
+                self.stream,
+            ))?;
+        }
+        Ok(x)
+    }
 }
 
 #[cfg(test)]
@@ -185,6 +219,33 @@ mod tests {
             let (values, elapsed) = r.recv().unwrap();
             println!("Elapsed {:?}", elapsed);
             assert_eq!(values, vec![2.0f64; 5]);
+        }
+    }
+
+    #[test]
+    fn test_broadcast_multi_gpus() {
+        let world_size = Cuda::device_count() as i32;
+        let id = ThreadGroup::new_id().unwrap();
+        let (s, r) = std::sync::mpsc::channel();
+        for rank in 0..world_size {
+            let s = s.clone();
+            let out = out.to_device(Device::Cuda(rank as usize));
+            std::thread::spawn(move || {
+                let group = ThreadGroup::new(world_size, rank, id).unwrap();
+                let out = if rank == 0 {
+                    let out = Tensor::ones(&[32, 1024, 1024], (Kind::Float, Device::Cuda(0)));
+                    group.broadcast(out).unwrap();
+                    out
+                }else{
+                    out = group.broadcast_recv(0).unwrap()
+                }
+                let values: Vec<_> = Vec::<f64>::from(out).into_iter().take(5).collect();
+                s.send(values).unwrap();
+            });
+        }
+        for _ in 0..world_size {
+            let values = r.recv().unwrap();
+            assert_eq!(values, vec![world_size as f64; 5]);
         }
     }
 }
