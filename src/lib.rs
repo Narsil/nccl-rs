@@ -60,6 +60,7 @@ pub struct ThreadGroup {
 fn kind_to_nccl(kind: Kind) -> ncclDataType_t {
     match kind {
         Kind::Half => ncclDataType_t_ncclFloat16,
+        Kind::BFloat16 => ncclDataType_t_ncclBfloat16,
         Kind::Float => ncclDataType_t_ncclFloat,
         Kind::Double => ncclDataType_t_ncclFloat64,
         Kind::Int8 => ncclDataType_t_ncclInt8,
