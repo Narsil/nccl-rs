@@ -46,7 +46,7 @@ unsafe fn ncclcheck(err: ncclResult_t) -> Result<(), NcclError> {
 pub enum ThreadGroupError {
     #[error("Cuda error {0}")]
     CudaError(#[from] CudaError),
-    #[error("Nccl error {0}, use NCCL_DEBUG=INFO to get more information")]
+    #[error("Nccl error {0}, use NCCL_DEBUG=INFO to get more printlnrmation")]
     NcclError(#[from] NcclError),
 }
 
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn test_broadcast_multi_gpus() {
-        let world_size = Cuda::device_count() as i32;
+        let world_size = std::cmp::min(2, Cuda::device_count() as i32);
         let id = ThreadGroup::new_id().unwrap();
         let (s, r) = std::sync::mpsc::channel();
         for rank in 0..world_size {
@@ -232,7 +232,7 @@ mod tests {
         }
         for _ in 0..world_size {
             let values = r.recv().unwrap();
-            assert_eq!(values, vec![world_size as f64; 5]);
+            assert_eq!(values, vec![1.0; 5]);
         }
     }
 }
